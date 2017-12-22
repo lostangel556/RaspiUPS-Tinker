@@ -1,24 +1,3 @@
-/* drivers/power/RaspiUPS_battery.c
- * RaspiUPS battery driver
- * http://www.raspberrypiwiki.com/index.php/Raspi_UPS_HAT_Board
- * --(1)--Save this file in "/drivers/power/"
- * --(2)--Define device under i2c1 devicetree in "arch/arm/boot/dts/rk3288-miniarm.dts" e.g
- * &i2c1 {
- *       RaspiUPS@36 {
- *              compatible = "RaspiUPS";
- *              reg = <0x36>;
- *      };
- * };
- * --(3)--Add following line to /drivers/power/Makefile
- * obj-$(CONFIG_RASPIUPS_BATTERY)  += raspiups_battery.o
- * --(4)--Add following to ./Kconfig
- * config RASPIUPS_BATTERY
- *       tristate "RaspiUPS Battery"
- *       depends on I2C
- *       default y
- *       help
- *         say Y to enable support for the Geekworm Rasp Pi Battery Hat
- */
 #include <linux/module.h>
 #include <linux/param.h>
 #include <linux/jiffies.h>
@@ -38,7 +17,7 @@
 #define RSENSE_RESISTANCE		10     ///  Rsense resistance m
 
 #define RASPIUPS_REG_MODE		0x06
-#define RASPIUPS_REG_RSOC		0x04 // Relative State-of-Charge
+#define RASPIUPS_REG_SOC		0x04 // Relative State-of-Charge
 #define RASPIUPS_REG_ROC 		0x16 //Charge or Discharge Rate
 #define RASPIUPS_REG_VOLT		0x02 //Current Voltage
 #define RASPIUPS_REG_STATUS             0x1A // Status
@@ -57,7 +36,13 @@ static enum power_supply_property RaspiUPS_battery_props[] = {
 	POWER_SUPPLY_PROP_PRESENT,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
-	POWER_SUPPLY_PROP_CAPACITY,
+        POWER_SUPPLY_TYPE_BATTERY,
+        POWER_SUPPLY_PROP_CHARGE_TYPE,
+        POWER_SUPPLY_PROP_TECHNOLOGY,
+        POWER_SUPPLY_PROP_HEALTH,
+        POWER_SUPPLY_PROP_CHARGE_COUNTER,
+        POWER_SUPPLY_PROP_CHARGE_FULL,
+        POWER_SUPPLY_PROP_CAPACITY,
 };
 
 static int i2c_master_reg8_send(const struct i2c_client *client, const char reg, const char *buf, int count, int scl_rate)
@@ -80,109 +65,93 @@ static int i2c_master_reg8_send(const struct i2c_client *client, const char reg,
     return (ret == 1) ? count : ret;
 }
 
-static int i2c_master_reg8_recv(const struct i2c_client *client, const char reg, char *buf, int count, int scl_rate)
-{
-    struct i2c_adapter *adap=client->adapter;
-    struct i2c_msg msgs[2];
-    int ret;
-    char reg_buf = reg;
-    msgs[0].addr = client->addr;
-    msgs[0].flags = client->flags;
-    msgs[0].len = 1;
-    msgs[0].buf = &reg_buf;
-    msgs[0].scl_rate = scl_rate;
-    msgs[1].addr = client->addr;
-    msgs[1].flags = client->flags | I2C_M_RD;
-    msgs[1].len = count;
-    msgs[1].buf = (char *)buf;
-    msgs[1].scl_rate = scl_rate;
-    ret = i2c_transfer(adap, msgs, 2); 
-    return (ret == 2)? count : ret;
-}
-
 static int RaspiUPS_write_regs(struct i2c_client *client, u8 reg, u8 const buf[], __u16 len)
 {
 	int ret; 
 	ret = i2c_master_reg8_send(client, reg, buf, (int)len, RASPIUPS_SPEED);
 	return ret;
 }
-/*
- * Common code for RASPIUPS devices read
- */
-static int RaspiUPS_read_regs(struct i2c_client *client, u8 reg, u8 buf[], unsigned len)
-{
-	int ret; 
-        
-	ret = i2c_master_reg8_recv(client, reg, buf, len, RASPIUPS_SPEED);
-	return ret; 
-}
 
 /*
- * Return the battery Voltage in milivolts
+ * Return the battery Voltage in millivolts mV
  * Or < 0 if something fails.
  */
 static int RaspiUPS_battery_voltage(struct RaspiUPS_device_info *di)
 {
 	int ret;
         long div;
-        div = 0.078125;
+        div = 78.125;
         
         ret = i2c_smbus_read_word_swapped(di->client, RASPIUPS_REG_VOLT);// * div;
 	if (ret<0) {
 		dev_err(di->dev, "RASPI error reading voltage\n");
 		return ret;
 	}
-        printk(KERN_INFO "RASPI VOLTS: %d\n", ret);
-	return ret;   //voltage (mV) = Voltage_code * 0.078125.
+	return (ret * div);   //voltage (mV) = Voltage_code * 78.125.
 }
 
 /*
  * Return the battery Relative State-of-Charge
  * Or < 0 if something fails.
  */
-static int RaspiUPS_battery_rsoc(struct RaspiUPS_device_info *di)
+static int RaspiUPS_battery_charge_counter(struct RaspiUPS_device_info *di)
 {
 	int ret;
-
-	ret = i2c_smbus_read_word_swapped(di->client, RASPIUPS_REG_RSOC);// / 25600) * BATTERY_CAPACITY_MAH;
+        
+	ret = i2c_smbus_read_word_swapped(di->client, RASPIUPS_REG_SOC);
 	if (ret<0) {
 		dev_err(di->dev, "error reading relative State-of-Charge\n");
 		return ret;
 	}
-        printk(KERN_INFO "RASPI RSOC: %d\n", ret);
-	return ret;    ////charge data (mAh) = charge_code / 256.
+        //Convert Battery Capacity from mA  then work out what is left from percentage from battery
+        //((BATTERY_CAPACITY_MAH) / 100) * (ret / 256) // Returns the amount of battery remaining in µA
+        printk(KERN_INFO "RASPI CHARGE: %d\n", ret ); 
+	return ret; //charge data (mA). 
 }
 
+//Battery Rate of Charge/Discharge
 static int RaspiUPS_battery_current(struct RaspiUPS_device_info *di)
 {
 	int ret;
         long div;
         div = 0.208;
         
-        ret = /*BATTERY_CAPACITY_MAH / */ i2c_smbus_read_word_swapped(di->client, RASPIUPS_REG_ROC);//) * div);
-	//ret = RaspiUPS_read_regs(di->client,RASPIUPS_REG_ROC,regs,2);
+        ret = i2c_smbus_read_word_data(di->client, RASPIUPS_REG_ROC);
 	if (ret<0) {
 		dev_err(di->dev, "RASPI error reading rate of change/current\n");
 		return ret;
 	}
         printk(KERN_INFO "RASPI ROC: %d\n", ret);
-	return ret;    ////current data (mA.h) = capacity / (charge_code * 0.208).
+	return ret;    ////current data (mA.h) = (charge_code * 0.208).
 }
 
+static int RaspiUPS_battery_capacity(struct RaspiUPS_device_info *di)
+{
+	int ret;
+        
+        ret = i2c_smbus_read_word_swapped(di->client, RASPIUPS_REG_SOC);
+	if (ret<0) {
+		dev_err(di->dev, "RASPI error reading capacity\n");
+		return ret;
+	}
+        //printk(KERN_INFO "RASPI ROC: %d\n", ret);
+	return ret / 256;    ////capacity = swapped hex / 256).
+}
+
+
+int battery_current;
 static int dc_charge_status(struct RaspiUPS_device_info *di)
 {
-        int ret, dc;
-	u8 regs[2];
-	long div;
-        div =0.208;
-        ret = RaspiUPS_read_regs(di->client,RASPIUPS_REG_ROC,regs,2);
+        int dc;
         
-        dc = printk("%d", i2c_smbus_read_word_swapped(di->client, RASPIUPS_REG_VOLT)) * div;
+        dc = RaspiUPS_battery_capacity(di);
     
-        if(dc > 0)
+        if(dc > battery_current)
 		return POWER_SUPPLY_STATUS_CHARGING;
 	else
 		return POWER_SUPPLY_STATUS_NOT_CHARGING;
+        battery_current = dc;
+        
 }
 
 static int RaspiUPS_battery_get_property(struct power_supply *psy,
@@ -196,17 +165,32 @@ static int RaspiUPS_battery_get_property(struct power_supply *psy,
 		val->intval = dc_charge_status(di);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-	case POWER_SUPPLY_PROP_PRESENT:
 		val->intval = RaspiUPS_battery_voltage(di);
+	case POWER_SUPPLY_PROP_PRESENT:
 		if (psp == POWER_SUPPLY_PROP_PRESENT)
-			val->intval = val->intval <= 0 ? 0 : 1;
+			val->intval = 1;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
 		val->intval = RaspiUPS_battery_current(di);
 		break;
-	case POWER_SUPPLY_PROP_CAPACITY:
-		val->intval = RaspiUPS_battery_rsoc(di);
-		break;
+        case POWER_SUPPLY_PROP_CHARGE_COUNTER:
+                val->intval = RaspiUPS_battery_charge_counter(di);
+                break;
+        case POWER_SUPPLY_PROP_CHARGE_TYPE:
+                val->intval = POWER_SUPPLY_CHARGE_TYPE_TRICKLE;
+                break;
+        case POWER_SUPPLY_PROP_TECHNOLOGY:
+                val->intval = POWER_SUPPLY_TECHNOLOGY_LIPO;
+                break;
+        case POWER_SUPPLY_PROP_HEALTH:
+                val->intval = POWER_SUPPLY_HEALTH_GOOD;
+                break;
+            case POWER_SUPPLY_PROP_CHARGE_FULL:
+                val->intval = BATTERY_CAPACITY_MAH;
+                break;
+            case POWER_SUPPLY_PROP_CAPACITY:
+                val->intval = RaspiUPS_battery_capacity(di);
+                break;
 	default:
 		return -EINVAL;
 	}
