@@ -1,5 +1,6 @@
 # RaspiUPS-Tinker
 
+Update. As it stands, the code works but doesnt display in the
 Note. this is still in development and I'm not a programmer by trade so bear with me if there are issues, or help me out if you can.
 Board: http://www.raspberrypiwiki.com/index.php/Raspi_UPS_HAT_Board
 
@@ -17,8 +18,8 @@ config RASPIUPS_BATTERY
 4. In Same folder, edit the Makefile to add a line "obj-$(CONFIG_RASPIUPS_BATTERY)  += raspiups_battery.o"
 5. Then edit the devicetree file "{android_kernel}/arch/arm/boot/dts/rk3288-miniarm.dts" to add the below in the i2c1 entry
 &i2c1 {
-      raspiups@36 {
-              reg = <0x36>;
-              compatible = "RaspiUPS-battery";
-      };
+      battery@36 {
+		compatible = "MAX17048";
+		reg = <0x36>;
+	};
 };
